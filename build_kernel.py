@@ -45,7 +45,7 @@ def check_file(filename):
 def match_and_get(regex: str, pattern: str):
     matched = re.search(regex, pattern)
     if not matched:
-        raise AssertionError('Failed to match: for pattern: %s regex: %s' % pattern, regex)
+        raise AssertionError(f'Failed to match: for pattern: {pattern} regex: {regex}')
     return matched.group(1)
 
 def print_dictinfo(info: dict[str, str]):
@@ -78,7 +78,31 @@ class CompilerClang:
         _, tcversion = s.communicate()
         tcversion = tcversion.decode('utf-8')
         return match_and_get(clangversionRegex, tcversion)
-    
+
+def setup_toolchain():
+    print("Toolchain not found, downloading WeebX Clang...")
+    try:
+        weebx_link_cmd = [
+            'curl', '-s', 'https://raw.githubusercontent.com/XSans0/WeebX-Clang/main/main/link.txt'
+        ]
+        weebx_url = subprocess.check_output(weebx_link_cmd).decode().strip()
+        
+        archive_name = "weebx-clang.tar.gz"
+        print(f"Downloading from: {weebx_url}")
+        popen_impl(['wget', weebx_url, '-O', archive_name])
+        
+        if os.path.exists("toolchain"):
+            shutil.rmtree("toolchain")
+        os.makedirs("toolchain", exist_ok=True)
+
+        print("Extracting toolchain...")
+        popen_impl(['tar', '-xvf', archive_name, '-C', 'toolchain'])
+        os.remove(archive_name)
+        print("Toolchain setup complete.")
+    except Exception as e:
+        print("Failed to download or extract WeebX Clang.")
+        raise e
+
 def main():
     parser = argparse.ArgumentParser(description="Build Grass Kernel with specified arguments")
     
@@ -88,50 +112,49 @@ def main():
     parser.add_argument('--no-ksu', action='store_true', help="Don't include KernelSU support in kernel")
     parser.add_argument('--allow-dirty', action='store_true', help="Allow dirty build")
 
-    # Parse the arguments
     args = parser.parse_args()
     
     if not args.oneui and not args.aosp:
         print("Please specify one of the following variants: --oneui or --aosp")
         return
     
-    if not args.target in ['a51', 'm21', 'm31', 'm31s', 'f41', 'm30s']:
+    if args.target not in ['a51', 'm21', 'm31', 'm31s', 'f41', 'm30s']:
         print("Please specify a valid target: a51/m21/m31/m31s/f41/m30s")
         return
-    
-    # Check files
+
+    # Check for AnyKernel3 version file
     if not check_file("AnyKernel3/version"):
         popen_impl(['git', 'submodule', 'update', '--init'])
+
+    # Check and setup toolchain
     if not check_file("toolchain"):
-        print(f"Please make toolchain available at {os.getcwd()}")
-        return
-    
+        setup_toolchain()
+
+    # Test compiler availability
     CompilerClang.test_executable()
     variantStr = 'OneUI' if args.oneui else 'AOSP'
     
-    # Print info
     print_dictinfo({
         'TARGET_KERNEL': 'Grass',
         'TARGET_VARIANT': variantStr,
         'TARGET_DEVICE': args.target,
-        'TARGET_INCLUDES_KSU': not args.no_ksu,
-        'TARGET_USES_LLVM': True,
+        'TARGET_INCLUDES_KSU': str(not args.no_ksu),
+        'TARGET_USES_LLVM': "True",
         'TOOLCHAIN': CompilerClang.get_version(),
     })
     
-    # Add toolchain in PATH environment variable
+    # Add toolchain to PATH
     tcPath = os.path.join(os.getcwd(), 'toolchain', 'bin')
-    if tcPath not in os.environ['PATH'].split(os.pathsep):
-        os.environ["PATH"] = tcPath + ':' + os.environ["PATH"]
-    
+    os.environ["PATH"] = tcPath + ':' + os.environ.get("PATH", "")
+
     outDir = 'out'
     if os.path.exists(outDir) and not args.allow_dirty:
         print('Make clean...')
         shutil.rmtree(outDir)
     
-    make_defconfig = []
     make_common = ['make', 'O=out', 'LLVM=1', f'-j{os.cpu_count()}']
-    make_defconfig += make_common 
+    make_defconfig = make_common.copy()
+    
     defconfigs = [f'{args.target}_defconfig', 'grass.config', f'{args.target}.config']
     if not args.no_ksu:
         defconfigs.append('ksu.config')
@@ -143,17 +166,19 @@ def main():
     t = datetime.now()
     print('Make defconfig...')
     popen_impl(make_defconfig)
+
     print('Make kernel...')
     popen_impl(make_common)
-    print('Done')
+    print('Kernel build completed.')
     t = datetime.now() - t
-    
+
     with open(os.path.join(outDir, 'include', 'generated', 'utsrelease.h')) as f:
         kver = match_and_get(r'"([^"]+)"', f.read())
-    
+
     shutil.copyfile('out/arch/arm64/boot/Image', 'AnyKernel3/Image')
     zipname = 'GrassKernel_{}_{}_{}.zip'.format(
         args.target, variantStr, datetime.today().strftime('%Y-%m-%d'))
+    
     os.chdir('AnyKernel3/')
     zip_files(zipname, [
         'Image', 
@@ -163,7 +188,8 @@ def main():
         'tools/busybox',
         'tools/magiskboot',
         'anykernel.sh',
-        'version'])
+        'version'
+    ])
     newZipName = os.path.join(os.getcwd(), '..', zipname)
     try:
         os.remove(newZipName)
@@ -171,11 +197,13 @@ def main():
         pass
     shutil.move(zipname, newZipName)
     os.chdir('..')
+
     print_dictinfo({
         'OUT_ZIPNAME': zipname,
         'KERNEL_VERSION': kver,
-        'ESCLAPED_TIME': str(t.total_seconds()) + ' seconds'
+        'ELAPSED_TIME': str(t.total_seconds()) + ' seconds'
     })
-    
+
 if __name__ == '__main__':
     main()
+
